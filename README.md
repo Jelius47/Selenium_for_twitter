@@ -209,6 +209,7 @@ python scraper --add="pd"
 |   pd   | Tweet poster's id, followers, and following count. |
 
 ---
+
 # Selenium Twitter Scraper
 
 A powerful Python-based web scraper for Twitter data collection using Selenium WebDriver. This tool allows you to extract tweets, user information, hashtags, and engagement metrics from Twitter without using the official API.
