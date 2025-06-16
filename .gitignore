@@ -161,7 +161,8 @@ cython_debug/
 #.idea/
 
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
+# Database
+./sentiment.db
 # dependencies
 frontend/node_modules
 /.pnp
