@@ -433,6 +433,7 @@ def get_job_status(job_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 404 if '404' in str(e) else 500
 
+
 @app.route('/api/tweets', methods=['GET'])
 def get_tweets():
     try:
