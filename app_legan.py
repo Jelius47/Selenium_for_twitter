@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import sqlite3
 from datetime import datetime, timedelta
+import time
 import random
 import io
 import pandas as pd
@@ -10,6 +11,11 @@ from collections import Counter
 import ast
 import uuid
 import traceback
+import json
+import os
+from threading import Thread
+import pickle
+import re
 
 app = Flask(__name__)
 # CORS(app)  # Enable CORS for all routes
@@ -33,10 +39,10 @@ class TwitterDataProcessor:
         c = conn.cursor()
         
         # Drop existing table to recreate with proper schema
-        c.execute('DROP TABLE IF EXISTS comments')
+        # c.execute('DROP TABLE IF EXISTS comments')
         
         # Create table with correct column names matching your CSV
-        c.execute('''CREATE TABLE comments
+        c.execute('''CREATE TABLE IF NOT EXISTS comments
                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
                      name TEXT,
                      handle TEXT,
@@ -57,11 +63,8 @@ class TwitterDataProcessor:
                      sentiment_label TEXT,
                      date TEXT)''')
 
-        # c.execute(''' CREATE TABLE IF NOT EXISTS scraping_jobs
-        #             (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS unique_tweet_id ON comments (tweet_id)''')
 
-
-        # ''')
         c.execute('''CREATE TABLE IF NOT EXISTS word_cloud
                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
                     word TEXT,
@@ -127,31 +130,90 @@ class TwitterDataProcessor:
         
         return 'Unknown'
     
-    def analyze_sentiment(self, text):
-        """Enhanced sentiment analysis for Swahili and English"""
-        if not text:
-            return 'Neutral'
-            
+    
+
+    
+
+    # You must define a helper function with the SAME preprocessing logic used for training
+    def _preprocess_text_for_prediction(text):
+        """
+        This helper function MUST EXACTLY MATCH the preprocessing from the training script.
+        """
+        if not isinstance(text, str):
+            return ""
+        
+        # Convert to lowercase
         text = text.lower()
         
-        # Positive keywords (Swahili and English)
+        # The same multi-step cleaning process from the trainer
+        text = re.sub(r'[^\w\s\'\-]', ' ', text)
+        text = re.sub(r'http\S+|www\S+|https\S+|@\w+', '', text)
+        text = re.sub(r'#(\w+)', r'\1', text)
+        text = ' '.join([w for w in text.split() if len(w) > 1 or w in ['ni', 'ya', 'na']])
+        
+        return text.strip()
+
+    # This should be a method in your class
+    def analyze_sentiment(self, text, model_path=r'model_preparation\models\sentiment_model.pkl', vectorizer_path=r'model_preparation\models\vectorizer.pkl'):
+        """
+        Enhanced sentiment analysis for Swahili and English.
+        """
+        if not text or not text.strip():
+            return 'Neutral'
+        
+        try:
+            # Load model and vectorizer
+            with open(model_path, 'rb') as f:
+                model = pickle.load(f)
+            with open(vectorizer_path, 'rb') as f:
+                vectorizer = pickle.load(f)
+            
+            # --- THIS IS THE CRITICAL FIX ---
+            # Use the correct, matching preprocessing function
+            text = text.lower()
+        
+        # The same multi-step cleaning process from the trainer
+            text = re.sub(r'[^\w\s\'\-]', ' ', text)
+            text = re.sub(r'http\S+|www\S+|https\S+|@\w+', '', text)
+            text = re.sub(r'#(\w+)', r'\1', text)
+            text = ' '.join([w for w in text.split() if len(w) > 1 or w in ['ni', 'ya', 'na']])
+            processed_text = text
+            
+            if not processed_text:
+                return 'Neutral' # Return Neutral if text is empty after cleaning (e.g., was only a URL)
+                
+            # Transform text and predict
+            text_vector = vectorizer.transform([processed_text])
+            prediction = model.predict(text_vector)[0]
+            
+            # Map prediction to sentiment
+            sentiment_map = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
+            return sentiment_map.get(prediction, 'Neutral')
+        
+        except FileNotFoundError:
+            print(f"MODEL/VECTORIZER NOT FOUND. Check paths. Falling back to keyword method.")
+            return self.fallback_keyword_analysis(text) # Assuming fallback is another method
+        except Exception as e:
+            print(f"An error occurred with the ML model: {e}. Falling back to keyword method.")
+            return self.fallback_keyword_analysis(text) # Assuming fallback is another method
+
+    # You should move the fallback logic to its own method for cleaner code
+    def fallback_keyword_analysis(self, text):
+        text = text.lower()
         positive_words = [
             'mzuri', 'nzuri', 'vizuri', 'maendeleo', 'mafanikio', 'furaha', 'raha',
-            'kazi', 'faida', 'heri', 'baraka', 'amani', 'upendo', 'ushindi',
-            'bora', 'safi', 'kamili', 'mzalendo', 'heshima', 'tumaini',
-            'good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic',
-            'love', 'happy', 'proud', 'success', 'progress', 'development'
+            'kazi', 'faida', 'heri', 'baraka', 'amani', 'upendo', 'ushindi', 'bora',
+            'safi', 'kamili', 'mzalendo', 'heshima', 'tumaini', 'good', 'great',
+            'excellent', 'amazing', 'wonderful', 'fantastic', 'love', 'happy',
+            'proud', 'success', 'progress', 'development'
         ]
-        
-        # Negative keywords (Swahili and English)
         negative_words = [
             'mbaya', 'vibaya', 'tatizo', 'matatizo', 'changamoto', 'huzuni',
             'hasira', 'upungufu', 'kasoro', 'kosa', 'makosa', 'shida',
-            'uongozi mbaya', 'rushwa', 'ufisadi', 'dhuluma', 'unyangavu',
-            'bad', 'terrible', 'awful', 'hate', 'angry', 'sad', 'problem',
-            'issue', 'corruption', 'failed', 'failure', 'disappointed'
+            'uongozi mbaya', 'rushwa', 'ufisadi', 'dhuluma', 'unyangavu', 'bad',
+            'terrible', 'awful', 'hate', 'angry', 'sad', 'problem', 'issue',
+            'corruption', 'failed', 'failure', 'disappointed'
         ]
-        
         positive_count = sum(1 for word in positive_words if word in text)
         negative_count = sum(1 for word in negative_words if word in text)
         
@@ -161,7 +223,7 @@ class TwitterDataProcessor:
             return 'Negative'
         else:
             return 'Neutral'
-    
+        
     def extract_words_for_cloud(self, text):
         """Extract meaningful words for word cloud"""
         if not text:
@@ -255,7 +317,7 @@ class TwitterDataProcessor:
                         formatted_timestamp = datetime.now().isoformat()
                     
                     # Insert into database with all fields
-                    c.execute('''INSERT INTO comments 
+                    c.execute('''INSERT OR IGNORE INTO comments 
                                 (name, handle, timestamp, verified, content, comments_count, 
                                  retweets, likes, analytics, tags, mentions, emojis, 
                                  profile_image, tweet_link, tweet_id, party, sentiment_label, date) 
@@ -263,7 +325,7 @@ class TwitterDataProcessor:
                             (name, handle, timestamp, verified, content, comments_count,
                              retweets, likes, analytics, tags, mentions, emojis,
                              profile_image, tweet_link, tweet_id, party, sentiment, formatted_timestamp))
-                    
+                                        
                     # Extract words for word cloud
                     words = self.extract_words_for_cloud(content)
                     for word in words:
@@ -330,29 +392,27 @@ class TwitterDataProcessor:
 # Initializing database
 processor = TwitterDataProcessor("sentiment.db")
 
-# FIXED API ROUTES
 
-class ScrapingJob(db.Model):
-    __tablename__ = 'scraping_jobs'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    job_id = db.Column(db.String(50), unique=True, nullable=False, index=True)
-    status = db.Column(db.String(20), default='pending', index=True)
-    parameters = db.Column(db.Text)
-    tweets_scraped = db.Column(db.Integer, default=0)
-    started_at = db.Column(db.DateTime, default=datetime.utcnow)
-    completed_at = db.Column(db.DateTime)
-    error_message = db.Column(db.Text)
-    target_type = db.Column(db.String(20))
-    target_value = db.Column(db.String(255), index=True)
-    max_tweets_requested = db.Column(db.Integer)
-    progress_percentage = db.Column(db.Float, default=0.0)
-    result_summary = db.Column(db.Text)
-    duration_seconds = db.Column(db.Float)
-    csv_file_path = db.Column(db.String(500))
-    
-    tweets = db.relationship('Tweet', backref='job', lazy='dynamic')
-    
+
+class ScrapingJob:
+    def __init__(self, job_id, parameters, target_type, target_value, max_tweets_requested, csv_file_path=None):
+        self.id = None
+        self.job_id = job_id
+        self.status = 'pending'
+        self.parameters = parameters
+        self.tweets_scraped = 0
+        self.started_at = datetime.utcnow()
+        self.completed_at = None
+        self.error_message = None
+        self.target_type = target_type
+        self.target_value = target_value
+        self.max_tweets_requested = max_tweets_requested
+        self.progress_percentage = 0.0
+        self.result_summary = None
+        self.duration_seconds = None
+        self.csv_file_path = csv_file_path
+        self.tweets = []
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -368,15 +428,14 @@ class ScrapingJob(db.Model):
             'duration_seconds': self.duration_seconds,
             'error_message': self.error_message
         }
-    
+
     def update_progress(self, tweets_scraped, percentage=None):
         self.tweets_scraped = tweets_scraped
         if percentage is not None:
             self.progress_percentage = min(100.0, max(0.0, float(percentage)))
         elif self.max_tweets_requested and self.max_tweets_requested > 0:
             self.progress_percentage = min(100.0, (tweets_scraped / self.max_tweets_requested) * 100)
-        db.session.commit()
-    
+
     def mark_completed(self, tweets_scraped, result_summary=None):
         self.status = 'completed'
         self.tweets_scraped = tweets_scraped
@@ -386,188 +445,315 @@ class ScrapingJob(db.Model):
             self.result_summary = json.dumps(result_summary)
         if self.started_at:
             self.duration_seconds = (self.completed_at - self.started_at).total_seconds()
-        db.session.commit()
-    
+
     def mark_failed(self, error_message):
         self.status = 'failed'
         self.error_message = str(error_message)
         self.completed_at = datetime.utcnow()
         if self.started_at:
             self.duration_seconds = (self.completed_at - self.started_at).total_seconds()
-        db.session.commit()
-    
+
     def mark_cancelled(self):
         self.status = 'cancelled'
         self.completed_at = datetime.utcnow()
         if self.started_at:
             self.duration_seconds = (self.completed_at - self.started_at).total_seconds()
-        db.session.commit()
 
-# Helper Functions
+    def save_to_db(self):
+        try:
+            conn = sqlite3.connect('sentiment.db')
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO scraping_jobs 
+                (job_id, status, parameters, target_type, target_value, max_tweets_requested, 
+                 tweets_scraped, progress_percentage, started_at, completed_at, error_message, 
+                 result_summary, duration_seconds, csv_file_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                self.job_id, self.status, self.parameters, self.target_type, self.target_value,
+                self.max_tweets_requested, self.tweets_scraped, self.progress_percentage,
+                self.started_at, self.completed_at, self.error_message, self.result_summary,
+                self.duration_seconds, self.csv_file_path
+            ))
+            conn.commit()
+        except Exception as e:
+            print(f"Error saving job to DB: {e}")
+
+    def update_in_db(self):
+        try:
+            conn = sqlite3.connect('sentiment.db')
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                UPDATE scraping_jobs 
+                SET status=?, tweets_scraped=?, progress_percentage=?, completed_at=?, 
+                    error_message=?, result_summary=?, duration_seconds=?
+                WHERE job_id=?
+            """, (
+                self.status, self.tweets_scraped, self.progress_percentage, self.completed_at,
+                self.error_message, self.result_summary, self.duration_seconds, self.job_id
+            ))
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+        except Exception as e:
+            print(f"Exception in update_in_db: {e}")
+        finally:
+            if conn:
+                conn.close()
+
+    @classmethod
+    def get_by_job_id(cls, job_id):
+        try:
+            conn = sqlite3.connect('sentiment.db')
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM scraping_jobs WHERE job_id=?", (job_id,))
+            row = cursor.fetchone()
+            if row:
+                job = cls.__new__(cls)
+                job.job_id = row[1]
+                job.status = row[2]
+                job.parameters = row[3]
+                job.target_type = row[4]
+                job.target_value = row[5]
+                job.max_tweets_requested = row[6]
+                job.tweets_scraped = row[7]
+                job.progress_percentage = row[8]
+                job.started_at = row[9]
+                job.completed_at = row[10]
+                job.error_message = row[11]
+                job.result_summary = row[12]
+                job.duration_seconds = row[13]
+                job.csv_file_path = row[14]
+                return job
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+        except Exception as e:
+            print(f"Exception in get_by_job_id: {e}")
+        finally:
+            if conn:
+                conn.close()
+        return None
+
 def extract_hashtags(text):
+    if not text:
+        return []
     return list(set(re.findall(r'#(\w+)', text.lower())))
 
 def extract_mentions(text):
+    if not text:
+        return []
     return list(set(re.findall(r'@(\w+)', text.lower())))
 
-def parse_csv_to_db(csv_file_path, job_id=None):
-    try:
-        df = pd.read_csv(csv_file_path)
-        tweets_added = 0
-
-        for _, row in df.iterrows():
-            if pd.isna(row.get('Tweet ID')):
-                continue
-
-            if Tweet.query.filter_by(tweet_id=str(row['Tweet ID'])).first():
-                continue
-
-            # Parse timestamp
-            try:
-                timestamp = datetime.fromisoformat(str(row.get('Timestamp', '')).replace('Z', '+00:00'))
-            except Exception:
-                timestamp = datetime.utcnow()
-
-            tweet = Tweet(
-                tweet_id=str(row['Tweet ID']),
-                name=row.get('Name', ''),
-                handle=row.get('Handle', '').lower(),
-                timestamp=timestamp,
-                verified=str(row.get('Verified', 'False')).lower() == 'true',
-                content=row.get('Content', ''),
-                comments=str(row.get('Comments', 0)),
-                retweets=str(row.get('Retweets', 0)),
-                likes=str(row.get('Likes', 0)),
-                analytics=str(row.get('Analytics', 0)),
-                profile_image=row.get('Profile Image', ''),
-                tweet_link=row.get('Tweet Link', ''),
-                job_id=job_id
-            )
-
-            db.session.add(tweet)
-
-            # Use stringified lists from CSV
-            try:
-                hashtags = ast.literal_eval(row.get('Tags', '[]'))
-                for tag in hashtags:
-                    db.session.add(Hashtag(tweet_id=tweet.tweet_id, hashtag=tag.lower()))
-            except Exception:
-                pass
-
-            try:
-                mentions = ast.literal_eval(row.get('Mentions', '[]'))
-                for mention in mentions:
-                    db.session.add(Mention(tweet_id=tweet.tweet_id, mention=mention.lower()))
-            except Exception:
-                pass
-
-            tweets_added += 1
-
-            if tweets_added % 100 == 0:
-                db.session.commit()
-
-        db.session.commit()
-        return tweets_added
-
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(f"Error parsing CSV: {str(e)}")
-        raise
 
 def run_scraper(job_id, data):
-    """Background task to run the scraper and save results"""
-    # Use the global app instance defined in this module
-    global app
-
-    with app.app_context():
+    with current_app.app_context():
+        job = None
         try:
-            job = ScrapingJob.query.filter_by(job_id=job_id).first()
+            job = ScrapingJob.get_by_job_id(job_id)
             if not job:
-                app.logger.error(f"Job {job_id} not found")
+                current_app.logger.error(f"Job {job_id} not found")
                 return
             
             job.status = 'running'
-            db.session.commit()
+            job.update_in_db()
 
             from scraper.twitter_scraper import Twitter_Scraper
 
-            USER_MAIL = data.get('mail', os.getenv("TWITTER_MAIL"))
-            USER_UNAME = data.get('username', os.getenv("TWITTER_USERNAME"))
-            USER_PASSWORD = data.get('password', os.getenv("TWITTER_PASSWORD"))
+            USER_MAIL = data.get('email')
+            USER_UNAME = data.get('username')
+            USER_PASSWORD = data.get('password')
 
-            if not any([USER_MAIL, USER_UNAME, USER_PASSWORD]):
-                raise ValueError("Missing Twitter credentials")
+            if not all([USER_MAIL, USER_UNAME, USER_PASSWORD]):
+                raise ValueError("Email, username, and password are required")
 
             max_tweets = min(int(data.get('tweets', 50)), 1000)
             target = data.get('target_username') or data.get('hashtag') or data.get('query')
             if not target:
                 raise ValueError("No target specified")
 
-            try:
-                scraper = Twitter_Scraper(
-                    mail=USER_MAIL,
-                    username=USER_UNAME,
-                    password=USER_PASSWORD,
-                )
-                scraper.login()
+            scraper = Twitter_Scraper(
+                mail=USER_MAIL,
+                username=USER_UNAME,
+                password=USER_PASSWORD,
+            )
+            
+            scraper.login()
 
-                tweets = []
-                for i, tweet_data in enumerate(scraper.scrape_tweets(
-                    max_tweets=max_tweets,
-                    scrape_username=data.get('target_username'),
-                    scrape_hashtag=data.get('hashtag'),
-                    scrape_query=data.get('query'),
-                    scrape_latest=data.get('latest', False),
-                    scrape_top=data.get('top', False)
-                )):
-                    tweets.append(tweet_data)
-                    if i % 10 == 0:
-                        job.update_progress(i + 1)
+            tweets = []
+            for i, tweet_data in enumerate(scraper.scrape_tweets(
+                max_tweets=max_tweets,
+                scrape_username=data.get('target_username'),
+                scrape_hashtag=data.get('hashtag'),
+                scrape_query=data.get('query'),
+                scrape_latest=data.get('latest', False),
+                scrape_top=data.get('top', False)
+            )):
+                tweets.append(tweet_data)
+                
+                if (i + 1) % 10 == 0:
+                    job.update_progress(i + 1)
+                    job.update_in_db()
 
-                for tweet_data in tweets:
-                    tweet = Tweet(
-                        tweet_id=tweet_data.get('tweet_id', str(int(time.time() * 1000))),
-                        name=tweet_data.get('name', ''),
-                        handle=tweet_data.get('handle', '').lower(),
-                        timestamp=datetime.fromtimestamp(tweet_data.get('timestamp', time.time())),
-                        verified=tweet_data.get('verified', False),
-                        content=tweet_data.get('content', ''),
-                        comments=tweet_data.get('comments', 0),
-                        retweets=tweet_data.get('retweets', 0),
-                        likes=tweet_data.get('likes', 0),
-                        analytics=tweet_data.get('analytics', 0),
-                        profile_image=tweet_data.get('profile_image', ''),
-                        tweet_link=tweet_data.get('tweet_link', ''),
-                        job_id=job_id
-                    )
-                    db.session.add(tweet)
+            conn = sqlite3.connect('sentiment.db')
+            cursor= conn.cursor()
+            for tweet_data in tweets:
+                cursor.execute("""
+                    INSERT INTO tweets 
+                    (tweet_id, name, handle, timestamp, verified, content, comments, 
+                     retweets, likes, analytics, profile_image, tweet_link, job_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    tweet_data.get('tweet_id', str(int(time.time() * 1000))),
+                    tweet_data.get('name', ''),
+                    tweet_data.get('handle', '').lower() if tweet_data.get('handle') else '',
+                    datetime.fromtimestamp(tweet_data.get('timestamp', time.time())),
+                    tweet_data.get('verified', False),
+                    tweet_data.get('content', ''),
+                    tweet_data.get('comments', 0),
+                    tweet_data.get('retweets', 0),
+                    tweet_data.get('likes', 0),
+                    tweet_data.get('analytics', 0),
+                    tweet_data.get('profile_image', ''),
+                    tweet_data.get('tweet_link', ''),
+                    job_id
+                ))
 
-                    for hashtag in extract_hashtags(tweet.content):
-                        db.session.add(Hashtag(tweet_id=tweet.tweet_id, hashtag=hashtag))
-                    for mention in extract_mentions(tweet.content):
-                        db.session.add(Mention(tweet_id=tweet.tweet_id, mention=mention))
+                tweet_id = tweet_data.get('tweet_id', str(int(time.time() * 1000)))
+                for hashtag in extract_hashtags(tweet_data.get('content', '')):
+                    cursor.execute("INSERT INTO hashtags (tweet_id, hashtag) VALUES (?, ?)",
+                                 (tweet_id, hashtag))
+                
+                for mention in extract_mentions(tweet_data.get('content', '')):
+                    cursor.execute("INSERT INTO mentions (tweet_id, mention) VALUES (?, ?)",
+                                 (tweet_id, mention))
 
-                db.session.commit()
+            cursor.commit()
 
-                job.mark_completed(
-                    tweets_scraped=len(tweets),
-                    result_summary={
-                        'target': target,
-                        'tweets_scraped': len(tweets),
-                        'success': True
-                    }
-                )
-
-            except Exception as e:
-                app.logger.error(f"Scraping error: {str(e)}")
-                job.mark_failed(str(e))
-                raise
+            job.mark_completed(
+                tweets_scraped=len(tweets),
+                result_summary={
+                    'target': target,
+                    'tweets_scraped': len(tweets),
+                    'success': True
+                }
+            )
+            job.update_in_db()
 
         except Exception as e:
-            app.logger.error(f"Job {job_id} failed: {str(e)}")
-            if 'job' in locals():
+            current_app.logger.error(f"Job {job_id} failed: {str(e)}")
+            if job:
                 job.mark_failed(str(e))
+                job.update_in_db()
             raise
+
+@app.route('/api/scrape', methods=['POST'])
+def start_scraping():
+    try:
+        if not request.is_json:
+            return jsonify({'error': 'Request must be JSON'}), 400
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        if not all([data.get('email'), data.get('username'), data.get('password')]):
+            return jsonify({
+                'error': 'Email, username, and password are required'
+            }), 400
+        
+        if not any([data.get('target_username'), data.get('hashtag'), data.get('query')]):
+            return jsonify({
+                'error': 'Must specify one of: target_username, hashtag, or query'
+            }), 400
+        
+        try:
+            max_tweets = int(data.get('tweets', 50))
+            if max_tweets <= 0 or max_tweets > 1000:
+                return jsonify({
+                    'error': 'tweets parameter must be between 1 and 1000'
+                }), 400
+        except (ValueError, TypeError):
+            return jsonify({'error': 'tweets parameter must be a valid integer'}), 400
+        
+        job_id = f"job_{int(time.time())}_{hash(json.dumps(data, sort_keys=True)) % 10000:04d}"
+        
+        if data.get('target_username'):
+            target_type = 'username'
+            target_value = data.get('target_username')
+        elif data.get('hashtag'):
+            target_type = 'hashtag'
+            target_value = data.get('hashtag')
+        else:
+            target_type = 'query'
+            target_value = data.get('query')
+        
+        job = ScrapingJob(
+            job_id=job_id,
+            parameters=json.dumps(data),
+            target_type=target_type,
+            target_value=target_value,
+            max_tweets_requested=max_tweets
+        )
+        
+        job.save_to_db()
+        
+        thread = Thread(target=run_scraper, args=(job_id, data))
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            'job_id': job_id,
+            'status': 'started',
+            'message': 'Scraping job started successfully',
+            'details': {
+                'target_type': target_type,
+                'target': target_value,
+                'max_tweets': max_tweets
+            }
+        }), 202
+    
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        current_app.logger.error(f"Error starting scraping job: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/scrape/<job_id>/status', methods=['GET'])
+def get_job_status_(job_id):
+    try:
+        job = ScrapingJob.get_by_job_id(job_id)
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        return jsonify(job.to_dict()), 200
+    
+    except Exception as e:
+        current_app.logger.error(f"Error getting job status: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/scrape/<job_id>/cancel', methods=['POST'])
+def cancel_job(job_id):
+    try:
+        job = ScrapingJob.get_by_job_id(job_id)
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        if job.status in ['completed', 'failed', 'cancelled']:
+            return jsonify({'error': f'Job already {job.status}'}), 400
+        
+        job.mark_cancelled()
+        job.update_in_db()
+        
+        return jsonify({
+            'job_id': job_id,
+            'status': 'cancelled',
+            'message': 'Job cancelled successfully'
+        }), 200
+    
+    except Exception as e:
+        current_app.logger.error(f"Error cancelling job: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
 # API Routes
 @app.route('/')
 def index():
@@ -586,51 +772,6 @@ def index():
         }
     })
 
-@app.route('/api/scrape', methods=['POST'])
-def start_scraping():
-    if not request.is_json:
-        return jsonify({'error': 'Request must be JSON'}), 400
-    
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-    
-    try:
-        # Validate input
-        if not any([data.get('target_username'), data.get('hashtag'), data.get('query')]):
-            return jsonify({'error': 'Must specify target_username, hashtag, or query'}), 400
-        
-        # Create job
-        job_id = f"job_{int(time.time())}_{hash(json.dumps(data)) % 10000:04d}"
-        job = ScrapingJob(
-            job_id=job_id,
-            parameters=json.dumps(data),
-            target_type='username' if data.get('target_username') else 'hashtag' if data.get('hashtag') else 'query',
-            target_value=data.get('target_username') or data.get('hashtag') or data.get('query'),
-            max_tweets_requested=min(int(data.get('tweets', 50)), 1000)  # Limit to 1000 max
-        )
-        
-        db.session.add(job)
-        db.session.commit()
-        
-        # Start background job
-        thread = Thread(target=run_scraper, args=(job_id, data))
-        thread.daemon = True
-        thread.start()
-        
-        return jsonify({
-            'job_id': job_id,
-            'status': 'started',
-            'message': 'Scraping job started successfully',
-            'details': {
-                'target': job.target_value,
-                'max_tweets': job.max_tweets_requested
-            }
-        }), 202
-    
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/analytics', methods=['GET'])
 def get_analytics():

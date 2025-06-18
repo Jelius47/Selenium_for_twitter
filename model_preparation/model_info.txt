@@ -1,0 +1,44 @@
+
+Model Performance:
+Accuracy: 0.850
+
+Classification Report:
+              precision    recall  f1-score   support
+
+    Negative       0.00      0.00      0.00         1
+     Neutral       0.70      1.00      0.82         7
+    Positive       1.00      0.83      0.91        12
+
+    accuracy                           0.85        20
+   macro avg       0.57      0.61      0.58        20
+weighted avg       0.84      0.85      0.83        20
+
+Model and vectorizer saved successfully in 'models/' directory!
+
+=== MODEL TESTING ===
+
+Text: Hii ni furaha kubwa sana! Maendeleo mazuri.
+Prediction: Positive
+Confidence: 0.384
+
+Text: Hili ni tatizo kubwa, hali mbaya sana.
+Prediction: Neutral
+Confidence: 0.400
+
+Text: Leo ni siku ya kawaida tu.
+Prediction: Positive
+Confidence: 0.430
+
+Text: Great progress in development!
+Prediction: Neutral
+Confidence: 0.480
+
+Text: This is a terrible situation.
+Prediction: Neutral
+Confidence: 0.461
+
+=== TRAINING COMPLETED ===
+Files created:
+- models/sentiment_model.pkl
+- models/vectorizer.pkl
+- models/confusion_matrix.png
